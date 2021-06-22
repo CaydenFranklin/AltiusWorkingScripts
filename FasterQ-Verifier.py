@@ -5,6 +5,8 @@ import json
 import re
 import numpy as np
 
+
+
 def out(command):
     result = run(command, stdout=PIPE, stderr=PIPE, universal_newlines=True, shell=True)
     return result.stdout, result.stderr
@@ -21,6 +23,24 @@ def check_move(source, target):
         command_arr.append('rm -rf ' + source)
         command_arr.append('mv ' + source + ' ' + target)
         return False
+
+
+#runs vbd-dump and gets size of fast-q file
+#then checks if we've allocated enough memory
+def check_mem(accession, default_mem):
+    try:
+        check = out("vdb-dump " + accession + " --info")
+        np_arr = np.array(check[0].split())
+        np_arr = np_arr[np_arr != ':']
+        x = np.where(np_arr == 'size')[0]
+        size = np_arr[x+1]
+        size = int(size[0].replace(",", ""))
+        if size > default_mem:
+            return size*1.2
+        else:
+            return default_mem
+    except IndexError:
+        return default_mem
 
 def write_job_file(job_file, job_name, srr, dir_str):
     mem = check_mem(srr, default_mem)
@@ -51,12 +71,8 @@ def test_file(srr, ls_results, dir_str):
     elif ((srr + "_1.fastq" in ls_results) and (srr + "_2.fastq") in ls_results) or (srr + ".fastq") in ls_results:
         #if files are uncompressed, compress them
         fail_arr.append("Uncompressed. Compressing: " + srr_srx[srr] + '\t' + srr)
-        write_job_file(srr +'_c.txt', srr+'_c', srr, dir_str)
-        print('Compress fastq files in ' + dir_str + '?')
-        print('Contents of ' + dir_str + ':\n' + out('ls ' + dir_str)[0])
-        i = input('(y/n)?: ')
-        if i == 'y':
-            out("sbatch %s" %(srr+'_c.txt'))
+        write_job_file(srr +'_c.sh', srr+'_c', srr, dir_str)
+        comp_arr[dir_str] = srr+'_c.sh'
         return False
     else:
         is_dir = os.path.isdir(dir_str + '_m')
@@ -93,13 +109,35 @@ def test_file(srr, ls_results, dir_str):
             fail_arr.append("Missing FastQ Files: " + srr_srx[srr] + '\t' + srr)
             return False
 
+
+def ask_compression():
+    i = input('Compress ' +str(len(comp_arr.keys())) + " total runs (y/n)?")
+    if i == 'y':
+        for item in comp_arr.values():
+            out("sbatch %s" %item)
+    else:
+        i = input('Review files individually for compression? (y/n)?')
+        if i == 'y':
+            for dir_str, item in comp_arr.entries():
+                print('Compress fastq files in ' + dir_str + '?')
+                print('Contents of ' + dir_str + ':\n' + out('ls ' + dir_str)[0])
+                i = input('(y/n)?: ')
+                if i == 'y':
+                    out("sbatch %s" %item)
+
+
 if __name__ == "__main__":
     good_arr = []
     fail_arr = []
     command_arr = []
+    comp_arr = {}
     wd = os.getcwd()
     srr_srx = {}
     path = sys.argv[1]
+
+    #default prefetch memory is 20G
+    default_mem = 2*10**10 
+
     with open(path, "r") as f:
         for line in f:
             li = line.split('\t')
@@ -131,11 +169,11 @@ if __name__ == "__main__":
                     result = test_file(srr, arr[0], dir_str)
                     if result == True and len(out('mv ' + dir_str + ' ' + srr_srx[item] + '/' + dir_str)[1]) > 1:
                         check_move(dir_str, (srr_srx[item] + '/' + dir_str))
+    ask_compression()
     fail_arr.sort()
     with open("fast_q_verified.txt", "w") as f:
         for f_a in fail_arr:
             f.write(f_a + '\n')
-        for g_a in good_arr:
-            f.write(g_a + '\n')
         for c_a in command_arr:
             f.write(c_a + '\n')
+        f.write('All other files succesfully downloaded')
