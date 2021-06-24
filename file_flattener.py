@@ -1,7 +1,8 @@
 from subprocess import PIPE, run
+import sys
 import os
 import shutil
-from pathlib import Path
+import glob
 line_arr = []
 
 
@@ -10,28 +11,28 @@ def out(command):
     return result.stdout, result.stderr
 
 
-def find(name, path):
-    for root, dirs, files in os.walk(path):
-        if name in dirs:
-            return os.path.join(root, name)
+read_file = sys.argv[1]
 
-with open("file_to_locate.txt", "r") as f:
+with open(read_file, "r") as f:
     for line in f:
         line_arr.append(line)
 
 wd = os.getcwd()
+out_arr = []
 
 for item in line_arr:
     item = item.strip()
     l = item.split()
-    chd = os.path.join('.', l[0])
-    path_to_missing = find(l[-1], chd)
-    
-    try:
-        shutil.move(path_to_missing, chd)
-    except shutil.Error:
-        pass
+    chd = os.path.join('./experiment_files', l[1])
+    glob_str = os.path.join(chd, l[0], '*')
+    for data in glob.glob(glob_str):
+        try:
+            shutil.move(data, os.path.join(chd))
+        except shutil.Error:
+            out_arr.append('Could not move files inside ' + chd)
+    rm_out = out('rmdir ' + os.path.join(chd, l[0]))
+    if(len(rm_out[1]) > 0):
+        out_arr.append('Could not delete directory ' + l[1])
 
-    merged_dir = find(l[0]+'_m', chd)
-    if len(os.listdir(merged_dir)) == 0:
-        out('rmdir ' + merged_dir)
+with open("file_flattener_out.txt", 'w') as file:
+    file.writelines("\n".join(out_arr))

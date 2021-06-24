@@ -4,7 +4,8 @@ from subprocess import PIPE, run
 import json
 import re
 import numpy as np
-
+import glob
+import shutil
 
 
 def out(command):
@@ -51,11 +52,24 @@ def write_job_file(job_file, job_name, srr, dir_str):
         j.writelines('jobName="' + job_name + '"\n')
         j.writelines('jobID=$(sbatch --parsable --partition=queue0 --job-name=$jobName --output=${OUTDIR}/${jobName}.o%j --error=${OUTDIR}/${jobName}.e%j --mem=$memSize --priority=10 <<EOF \n')
         j.writelines('#!/bin/bash\n')
-        j.writelines('cd ' + dir_str)
-        j.writelines('find . -name "*.fastq" -exec pigz {} \;' + dir_str + '\n')
+        j.writelines('cd ' + dir_str + '\n')
+        j.writelines('find . -name "*.fastq" -exec pigz {} \; \n')
         j.writelines('EOF' + '\n')
         j.writelines(') \n')
         j.writelines('exit 0 \n')
+
+
+def move_file(src, dest):
+    is_dir = os.path.isdir(src)
+    if is_dir:
+        for data in glob.glob(src + '/*'):
+            try:
+                shutil.move(data, dest)
+            except shutil.Error:
+                no_fastq.append('Could not move files inside ' + dest)
+        return True
+    else:
+        return False
 
 
 def test_file(srr, ls_results, dir_str):
@@ -66,52 +80,35 @@ def test_file(srr, ls_results, dir_str):
             return True             
         else:
             #likely need to rerun ffq
-            fail_arr.append("Missing metadata only: " + srr_srx[srr] + '\t' + srr)
+            no_metadata.append("Missing metadata only: " + srr + '\t' + srr_srx[srr])
             return False
     elif ((srr + "_1.fastq" in ls_results) and (srr + "_2.fastq") in ls_results) or (srr + ".fastq") in ls_results:
         #if files are uncompressed, compress them
-        fail_arr.append("Uncompressed. Compressing: " + srr_srx[srr] + '\t' + srr)
+        no_fastq.append("Uncompressed. Compressing: " + srr + '\t' + srr_srx[srr])
         write_job_file(srr +'_c.sh', srr+'_c', srr, dir_str)
         comp_arr[dir_str] = srr+'_c.sh'
         return False
     else:
-        is_dir = os.path.isdir(dir_str + '_m')
-        if is_dir and len(out('mv ' + dir_str+'_m' + ' ' + dir_str)[1]) > 1:
-            c_m = check_move(dir_str, dir_str+'_m')
-            if not c_m:
-                fail_arr.append("File requiring move: " + srr_srx[srr] + '\t' + srr)
-            else:
-                good_arr.append("Succesfully downloaded: " + srr_srx[srr] + '\t' + srr)
-            return c_m
-
+        un_move_dir = os.path.join(dir_str, srr)
+        if os.path.isdir(un_move_dir):
+            b = move_file(dir_str, un_move_dir)
+        elif os.path.isdir(un_move_dir + '_m'):
+            un_move_dir = un_move_dir + '_m'
+            b_m = move_file(dir_str, un_move_dir)
         else:
-            is_dir = os.path.isdir(dir_str + '/' + srr +'_m')
-            if is_dir and len(out('ls ' + dir_str + '/' + srr +'_m')[0]) > 0:
-                print('Move all files in ' + dir_str + '/' + srr +'_m' + ' up a level? (y/n)')
-                print('Contents of' + dir_str + '/' + srr +'_m:\n' + out('ls ' + dir_str + '/' + srr +'_m')[0])
-                i = input('(y/n)?: ')
-                if i == 'y':
-                    print('move attempting')
-                    arr = out('mv ' + dir_str + '/' + srr + '_m/* ' + dir_str)
-                    print(arr[1])
-                    arr = out('rmdir ' + dir_str + '/' + srr + '_m')
-                    print(arr[1])
-                    if len(arr[1]) == 0:
-                        good_arr.append("Succesfully moved: " + srr_srx[srr] + '\t' + srr)
-                    else:
-                        fail_arr.append("File requiring move: " + srr_srx[srr] + '\t' + srr)
-                    return True
-                else:
-                    command_arr.append('mv ' + dir_str + '/' + srr + '_m/* ' + dir_str + '/' + srr)
-                    command_arr.append('rmdir ' + dir_str + '/' + srr + '_m')
-                    return False
-
-            fail_arr.append("Missing FastQ Files: " + srr_srx[srr] + '\t' + srr)
+            no_fastq.append('Cannot locate FastQ files for %s' %(' '.join([srr, srr_srx[srr]])))
             return False
+        if b or b_m:
+            rm_out = out('rmdir ' + un_move_dir)
+            if(len(rm_out[1]) > 0):
+                directory_err.append(' '.join(['Could not delete directory', un_move_dir]))
+        return False
 
 
 def ask_compression():
-    i = input('Compress ' +str(len(comp_arr.keys())) + " total runs (y/n)?")
+    if len(comp_arr.keys()) == 0:
+        return
+    i = input('Compress ' + str(len(comp_arr.keys())) + " total runs (y/n)?")
     if i == 'y':
         for item in comp_arr.values():
             out("sbatch %s" %item)
@@ -124,16 +121,45 @@ def ask_compression():
                 i = input('(y/n)?: ')
                 if i == 'y':
                     out("sbatch %s" %item)
+                    out("rm %s" %job_file)
+
+def print_stats():
+    n_files = len(srr_srx.keys())
+    return '\n'.join(['%s verified.' %n_files, 
+                      '%s succesfully downloaded.' %len(good_arr), 
+                      '%s have either FastQ files missing.' %len(no_fastq),
+                      '%s have directory manipulation errors.' %len(directory_err),
+                      '%s have metadata missing.' %len(no_metadata),
+                      'Total correct percentage of %s%%\n' %round(len(good_arr)/n_files * 100, 2),
+                      'Total correct percentage (excluding metadata errors) of %s%%\n' %round((1 - len(no_fastq)/n_files) * 100, 2)
+                    ])
+
+
+def write_output(out_file):
+    with open(out_file, "w") as f:
+        f.writelines(print_stats())
+        f.write('\n')
+        f.writelines('\n'.join(no_fastq))
+        f.write('\n')
+        f.writelines('\n'.join(directory_err))
+        f.write('\n')
+        f.writelines('\n'.join(no_metadata))
+        f.write('\n')
+        f.write('\nAll other files succesfully downloaded')
 
 
 if __name__ == "__main__":
     good_arr = []
     fail_arr = []
-    command_arr = []
+    no_fastq = []
+    no_metadata = []
+    directory_err = []
     comp_arr = {}
+    base_dir = 'experiment_files'
     wd = os.getcwd()
     srr_srx = {}
     path = sys.argv[1]
+    file_name = '_'.join(sys.argv[2], 'verified.txt')
 
     #default prefetch memory is 20G
     default_mem = 2*10**10 
@@ -144,36 +170,14 @@ if __name__ == "__main__":
             srr_srx[li[0].strip()] = li[1].strip()
 
     for item in srr_srx:
-        dir_str = srr_srx[item] + '/' + item
-        #Test for default directory (./SRXxxx/SRRxxx)
+        dir_str = os.path.join(base_dir, srr_srx[item])
+        #Test for default directory (./experiment_files/SRXxxx)
         is_dir = os.path.isdir(dir_str)
         if is_dir:
             arr = out('ls ' + dir_str)
             result = test_file(item, arr[0], dir_str)
         else:
-            dir_str = srr_srx[item] + '/' + item + '_m'
-            is_dir = os.path.isdir(dir_str)
-            if is_dir:
-                arr = out('ls ' + dir_str)
-                result = test_file(item, arr[0], dir_str)
-                if result == True and len(out('mv ' + dir_str + ' ' + dir_str[0:-2])[1]) > 1:
-                    check_move(dir_str, dir_str[0:-2])
-            else:
-                dir_str = item
-                is_dir = os.path.isdir(dir_str)
-                if not is_dir:
-                    fail_arr.append("File cannot be located: " + srr_srx[item] + '\t' + item)
-                    continue
-                else:
-                    arr = out('ls ' + dir_str)
-                    result = test_file(srr, arr[0], dir_str)
-                    if result == True and len(out('mv ' + dir_str + ' ' + srr_srx[item] + '/' + dir_str)[1]) > 1:
-                        check_move(dir_str, (srr_srx[item] + '/' + dir_str))
+            no_fastq.append(' '.join(["File cannot be located:", srr_srx[item], item]))
+
     ask_compression()
-    fail_arr.sort()
-    with open("fast_q_verified.txt", "w") as f:
-        for f_a in fail_arr:
-            f.write(f_a + '\n')
-        for c_a in command_arr:
-            f.write(c_a + '\n')
-        f.write('All other files succesfully downloaded')
+    write_output(file_name)
